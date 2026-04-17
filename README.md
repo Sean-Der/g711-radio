@@ -31,3 +31,7 @@ Edit the gitignored `config.local.json`, send your UDP audio to the configured p
 - The server is hard-coded for `PCMU` and strips a `12` byte transport header before reading each `160` byte audio frame.
 - The sample client loads all configured streams from `/streams` and lets you connect to one stream at a time.
 - The sample client uses non-trickle ICE and is intended for local or simple LAN testing. If you need internet-facing playback, add STUN/TURN configuration.
+
+## Test with GStreamer
+
+An example sender lives at [examples/gst-launch-pcmu-sine.sh](/Users/seaduboi/code/g711-radio/examples/gst-launch-pcmu-sine.sh:1). It generates an 8 kHz mono sine wave, encodes it as `PCMU`, packetizes it as RTP, and sends it to `127.0.0.1:2250`.
