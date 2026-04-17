@@ -2,7 +2,10 @@ module g711-radio
 
 go 1.24.0
 
-require github.com/pion/webrtc/v4 v4.2.11
+require (
+	github.com/google/gopacket v1.1.19
+	github.com/pion/webrtc/v4 v4.2.11
+)
 
 require (
 	github.com/google/uuid v1.6.0 // indirect

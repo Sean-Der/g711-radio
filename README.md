@@ -35,3 +35,9 @@ Edit the gitignored `config.local.json`, send your UDP audio to the configured p
 ## Test with GStreamer
 
 An example sender lives at [examples/gst-launch-pcmu-sine.sh](/Users/seaduboi/code/g711-radio/examples/gst-launch-pcmu-sine.sh:1). It generates an 8 kHz mono sine wave, encodes it as `PCMU`, packetizes it as RTP, and sends it to `127.0.0.1:2250`.
+
+## Debugging with pcapng
+
+```bash
+go run ./cmd/replay-pcap -pcap g711.pcapng -addr 127.0.0.1:2250
+```
