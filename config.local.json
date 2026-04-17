@@ -1,0 +1,7 @@
+{
+  "httpPort": 8080,
+  "streams": [
+    { "streamName": "Studio A", "udpPort": 2250 },
+    { "streamName": "Studio B", "udpPort": 2251 }
+  ]
+}

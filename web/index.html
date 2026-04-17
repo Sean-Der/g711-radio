@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>G.711 Radio</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4efe6;
+        --panel: rgba(255, 252, 246, 0.92);
+        --ink: #1e241f;
+        --muted: #5f6d63;
+        --accent: #1b7f5a;
+        --line: rgba(30, 36, 31, 0.12);
+        --shadow: 0 20px 60px rgba(37, 45, 37, 0.14);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(217, 164, 65, 0.28), transparent 30%),
+          radial-gradient(circle at bottom right, rgba(27, 127, 90, 0.22), transparent 34%),
+          linear-gradient(180deg, #f8f3eb 0%, var(--bg) 100%);
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+
+      main {
+        width: min(760px, 100%);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 28px;
+        padding: 32px;
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(14px);
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        font-size: clamp(2.3rem, 6vw, 4.6rem);
+        line-height: 0.95;
+        letter-spacing: -0.04em;
+        font-weight: 700;
+      }
+
+      p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 1.05rem;
+        line-height: 1.6;
+      }
+
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 28px;
+      }
+
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 14px 22px;
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+        background: var(--accent);
+        color: #fffdf8;
+        transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+        box-shadow: 0 12px 24px rgba(27, 127, 90, 0.24);
+      }
+
+      button:hover:not(:disabled) {
+        transform: translateY(-1px);
+      }
+
+      button:disabled {
+        opacity: 0.55;
+        cursor: wait;
+      }
+
+      .secondary {
+        background: transparent;
+        color: var(--ink);
+        border: 1px solid var(--line);
+        box-shadow: none;
+      }
+
+      .streams {
+        display: grid;
+        gap: 14px;
+        margin-top: 28px;
+      }
+
+      .stream {
+        display: grid;
+        gap: 12px;
+        padding: 18px;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.72);
+        border: 1px solid var(--line);
+      }
+
+      .stream header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .stream h2 {
+        margin: 0;
+        font-size: 1.2rem;
+      }
+
+      .meta {
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      .empty,
+      .status {
+        margin-top: 28px;
+        padding: 16px 18px;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.72);
+        border: 1px solid var(--line);
+      }
+
+      .status strong {
+        display: block;
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
+
+      #statusText {
+        color: var(--ink);
+        font-size: 1rem;
+      }
+
+      audio {
+        width: 100%;
+        margin-top: 18px;
+        border-radius: 999px;
+      }
+
+      .note {
+        margin-top: 18px;
+        font-size: 0.94rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>G.711 Radio</h1>
+      <p>
+        This page loads the configured streams from the Go server and opens a WebRTC connection to
+        whichever live UDP stream you choose.
+      </p>
+
+      <div class="row">
+        <button id="disconnectBtn" class="secondary" type="button" disabled>Disconnect</button>
+      </div>
+
+      <div id="streams" class="streams"></div>
+
+      <div class="status">
+        <strong>Connection</strong>
+        <div id="statusText">Idle.</div>
+        <audio id="player" controls autoplay playsinline></audio>
+      </div>
+
+      <p class="note">
+        Stream names and ports come from <code>config.local.json</code>. Every stream is hard-coded
+        for <code>PCMU</code> with a 12-byte header in front of each 160-byte audio frame.
+      </p>
+    </main>
+
+    <script>
+      const disconnectBtn = document.getElementById("disconnectBtn");
+      const statusText = document.getElementById("statusText");
+      const player = document.getElementById("player");
+      const streamsRoot = document.getElementById("streams");
+
+      let streams = [];
+      let pc;
+      let currentStreamId = null;
+      let currentStreamName = "";
+      let connectingStreamId = null;
+
+      function setStatus(text) {
+        statusText.textContent = text;
+      }
+
+      function waitForIceGatheringComplete(connection) {
+        if (connection.iceGatheringState === "complete") {
+          return Promise.resolve();
+        }
+
+        return new Promise((resolve) => {
+          const checkState = () => {
+            if (connection.iceGatheringState === "complete") {
+              connection.removeEventListener("icegatheringstatechange", checkState);
+              resolve();
+            }
+          };
+
+          connection.addEventListener("icegatheringstatechange", checkState);
+        });
+      }
+
+      function renderStreams() {
+        streamsRoot.innerHTML = "";
+
+        if (!streams.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "No streams are configured.";
+          streamsRoot.append(empty);
+          return;
+        }
+
+        for (const stream of streams) {
+          const card = document.createElement("section");
+          card.className = "stream";
+
+          const header = document.createElement("header");
+          const title = document.createElement("h2");
+          title.textContent = stream.streamName;
+          const meta = document.createElement("div");
+          meta.className = "meta";
+          meta.textContent = `UDP ${stream.udpPort}`;
+          header.append(title, meta);
+
+          const button = document.createElement("button");
+          if (connectingStreamId) {
+            button.textContent = connectingStreamId === stream.id ? "Connecting..." : "Busy";
+            button.disabled = true;
+          } else if (currentStreamId === stream.id && pc) {
+            button.textContent = "Listening";
+            button.disabled = true;
+          } else {
+            button.textContent = "Listen";
+            button.disabled = false;
+            button.addEventListener("click", () => {
+              void connect(stream);
+            });
+          }
+
+          card.append(header, button);
+          streamsRoot.append(card);
+        }
+      }
+
+      function closeCurrentConnection() {
+        const connection = pc;
+        pc = undefined;
+        if (connection) {
+          connection.close();
+        }
+      }
+
+      function disconnect(updateStatus = true) {
+        closeCurrentConnection();
+        player.srcObject = null;
+        currentStreamId = null;
+        currentStreamName = "";
+        connectingStreamId = null;
+        disconnectBtn.disabled = true;
+        renderStreams();
+
+        if (updateStatus) {
+          setStatus("Disconnected.");
+        }
+      }
+
+      async function connect(stream) {
+        disconnect(false);
+
+        currentStreamId = stream.id;
+        currentStreamName = stream.streamName;
+        connectingStreamId = stream.id;
+        renderStreams();
+        setStatus(`Creating peer connection for ${stream.streamName}...`);
+
+        const connection = new RTCPeerConnection();
+        pc = connection;
+        connection.addTransceiver("audio", { direction: "recvonly" });
+
+        connection.addEventListener("track", async (event) => {
+          if (pc !== connection) {
+            return;
+          }
+
+          player.srcObject = event.streams[0];
+          try {
+            await player.play();
+          } catch (error) {
+            setStatus(`Connected, but autoplay was blocked: ${error.message}`);
+          }
+        });
+
+        connection.addEventListener("connectionstatechange", () => {
+          if (pc !== connection) {
+            return;
+          }
+
+          setStatus(`${currentStreamName}: ${connection.connectionState}`);
+          if (connection.connectionState === "connected") {
+            connectingStreamId = null;
+            disconnectBtn.disabled = false;
+            renderStreams();
+          }
+
+          if (["failed", "closed", "disconnected"].includes(connection.connectionState)) {
+            disconnect();
+          }
+        });
+
+        try {
+          const offer = await connection.createOffer();
+          await connection.setLocalDescription(offer);
+          await waitForIceGatheringComplete(connection);
+
+          setStatus(`Sending offer for ${stream.streamName}...`);
+          const response = await fetch("/offer", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              streamId: stream.id,
+              offer: connection.localDescription,
+            }),
+          });
+
+          if (!response.ok) {
+            throw new Error(await response.text());
+          }
+
+          const answer = await response.json();
+          await connection.setRemoteDescription(answer);
+
+          if (pc === connection) {
+            connectingStreamId = null;
+            renderStreams();
+            setStatus(`Waiting for ${stream.streamName} audio...`);
+          }
+        } catch (error) {
+          if (pc === connection) {
+            disconnect(false);
+          }
+          setStatus(`Connection failed: ${error.message}`);
+        }
+      }
+
+      async function loadStreams() {
+        setStatus("Loading streams...");
+
+        const response = await fetch("/streams");
+        if (!response.ok) {
+          throw new Error(await response.text());
+        }
+
+        streams = await response.json();
+        renderStreams();
+
+        if (streams.length) {
+          setStatus("Choose a stream.");
+        } else {
+          setStatus("No streams configured.");
+        }
+      }
+
+      disconnectBtn.addEventListener("click", () => disconnect());
+
+      window.addEventListener("load", async () => {
+        try {
+          await loadStreams();
+        } catch (error) {
+          streams = [];
+          renderStreams();
+          setStatus(`Failed to load streams: ${error.message}`);
+        }
+      });
+    </script>
+  </body>
+</html>
