@@ -20,6 +20,10 @@
         box-sizing: border-box;
       }
 
+      [hidden] {
+        display: none !important;
+      }
+
       body {
         margin: 0;
         min-height: 100vh;
@@ -101,6 +105,35 @@
         margin-top: 28px;
       }
 
+      .launch {
+        display: grid;
+        gap: 14px;
+        margin-top: 28px;
+        padding: 24px;
+        border-radius: 24px;
+        background:
+          linear-gradient(135deg, rgba(27, 127, 90, 0.14), rgba(217, 164, 65, 0.16)),
+          rgba(255, 255, 255, 0.78);
+        border: 1px solid var(--line);
+      }
+
+      .launch strong {
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        color: var(--muted);
+      }
+
+      .launch h2 {
+        margin: 0;
+        font-size: clamp(1.8rem, 4vw, 2.6rem);
+        line-height: 1;
+      }
+
+      .launch p {
+        margin: 0;
+      }
+
       .stream {
         display: grid;
         gap: 12px;
@@ -166,42 +199,136 @@
     <main>
       <h1>G.711 Radio</h1>
       <p>
-        This page loads the configured streams from the Go server and opens a WebRTC connection to
-        whichever live UDP stream you choose.
+        This page loads the configured streams from the Go server and launches each feed in its own
+        tab, so the player only runs on a dedicated stream page.
       </p>
 
-      <div class="row">
-        <button id="disconnectBtn" class="secondary" type="button" disabled>Disconnect</button>
-      </div>
+      <div id="launchRoot"></div>
 
       <div id="streams" class="streams"></div>
 
-      <div class="status">
+      <div id="statusPanel" class="status" hidden>
         <strong>Connection</strong>
         <div id="statusText">Idle.</div>
+        <div class="row">
+          <button id="disconnectBtn" class="secondary" type="button" disabled>Disconnect</button>
+        </div>
         <audio id="player" controls autoplay playsinline></audio>
       </div>
 
       <p class="note">
         Stream names and ports come from <code>config.local.json</code>. Every stream is hard-coded
-        for <code>PCMU</code> with a 12-byte header in front of each 160-byte audio frame.
+        for <code>PCMU</code> with a 12-byte header in front of each 160-byte audio frame. The
+        selected feed is kept in the page URL, clicking <code>Listen</code> opens that feed in a
+        new tab, and <code>?stream=...</code> links stop on a page with a
+        <code>Start Stream</code> button instead of autoplaying.
       </p>
     </main>
 
     <script>
       const disconnectBtn = document.getElementById("disconnectBtn");
+      const launchRoot = document.getElementById("launchRoot");
+      const statusPanel = document.getElementById("statusPanel");
       const statusText = document.getElementById("statusText");
       const player = document.getElementById("player");
       const streamsRoot = document.getElementById("streams");
+      const streamQueryParam = "stream";
 
       let streams = [];
       let pc;
       let currentStreamId = null;
       let currentStreamName = "";
       let connectingStreamId = null;
+      let sharePageStream = null;
 
       function setStatus(text) {
         statusText.textContent = text;
+      }
+
+      function hasRequestedStream() {
+        return Boolean(getRequestedStreamId());
+      }
+
+      function renderPageChrome() {
+        const showPlayerUI = hasRequestedStream();
+        statusPanel.hidden = !showPlayerUI;
+      }
+
+      function buildStreamURL(streamId) {
+        const url = new URL(window.location.href);
+        if (streamId) {
+          url.searchParams.set(streamQueryParam, streamId);
+        } else {
+          url.searchParams.delete(streamQueryParam);
+        }
+        return url;
+      }
+
+      function syncURL(streamId) {
+        window.history.replaceState(null, "", buildStreamURL(streamId).toString());
+        renderPageChrome();
+      }
+
+      function getRequestedStreamId() {
+        return new URL(window.location.href).searchParams.get(streamQueryParam);
+      }
+
+      function openStreamInNewTab(stream) {
+        window.open(buildStreamURL(stream.id).toString(), "_blank", "noopener,noreferrer");
+      }
+
+      function isDedicatedStreamPage() {
+        return Boolean(sharePageStream);
+      }
+
+      function showShareLanding() {
+        return Boolean(isDedicatedStreamPage() && !pc && !connectingStreamId);
+      }
+
+      function renderLaunchView() {
+        launchRoot.innerHTML = "";
+        launchRoot.hidden = !showShareLanding();
+        if (launchRoot.hidden) {
+          return;
+        }
+
+        const card = document.createElement("section");
+        card.className = "launch";
+
+        const eyebrow = document.createElement("strong");
+        eyebrow.textContent = "Shared Feed";
+
+        const title = document.createElement("h2");
+        title.textContent = sharePageStream.streamName;
+
+        const description = document.createElement("p");
+        description.textContent = `UDP ${sharePageStream.udpPort}. Start the stream when you're ready.`;
+
+        const actions = document.createElement("div");
+        actions.className = "row";
+
+        const startButton = document.createElement("button");
+        startButton.type = "button";
+        startButton.textContent = "Start Stream";
+        startButton.addEventListener("click", () => {
+          void connect(sharePageStream);
+        });
+
+        const allStreamsButton = document.createElement("button");
+        allStreamsButton.type = "button";
+        allStreamsButton.className = "secondary";
+        allStreamsButton.textContent = "All Streams";
+        allStreamsButton.addEventListener("click", () => {
+          sharePageStream = null;
+          syncURL(null);
+          renderLaunchView();
+          renderStreams();
+          setStatus(streams.length ? "Choose a stream." : "No streams configured.");
+        });
+
+        actions.append(startButton, allStreamsButton);
+        card.append(eyebrow, title, description, actions);
+        launchRoot.append(card);
       }
 
       function waitForIceGatheringComplete(connection) {
@@ -222,7 +349,11 @@
       }
 
       function renderStreams() {
+        streamsRoot.hidden = isDedicatedStreamPage();
         streamsRoot.innerHTML = "";
+        if (streamsRoot.hidden) {
+          return;
+        }
 
         if (!streams.length) {
           const empty = document.createElement("div");
@@ -250,12 +381,19 @@
             button.disabled = true;
           } else if (currentStreamId === stream.id && pc) {
             button.textContent = "Listening";
-            button.disabled = true;
+            button.disabled = false;
+            button.title = "Open this feed in a new tab";
+            button.addEventListener("click", () => openStreamInNewTab(stream));
           } else {
             button.textContent = "Listen";
             button.disabled = false;
             button.addEventListener("click", () => {
-              void connect(stream);
+              if (sharePageStream) {
+                void connect(stream);
+                return;
+              }
+
+              openStreamInNewTab(stream);
             });
           }
 
@@ -272,26 +410,36 @@
         }
       }
 
-      function disconnect(updateStatus = true) {
+      function disconnect(updateStatus = true, keepURL = false) {
         closeCurrentConnection();
         player.srcObject = null;
         currentStreamId = null;
         currentStreamName = "";
+        if (!keepURL) {
+          syncURL(null);
+        }
         connectingStreamId = null;
         disconnectBtn.disabled = true;
+        renderLaunchView();
         renderStreams();
 
         if (updateStatus) {
-          setStatus("Disconnected.");
+          if (showShareLanding()) {
+            setStatus(`Ready to start ${sharePageStream.streamName}.`);
+          } else {
+            setStatus("Disconnected.");
+          }
         }
       }
 
       async function connect(stream) {
-        disconnect(false);
+        disconnect(false, true);
 
         currentStreamId = stream.id;
         currentStreamName = stream.streamName;
         connectingStreamId = stream.id;
+        syncURL(stream.id);
+        renderLaunchView();
         renderStreams();
         setStatus(`Creating peer connection for ${stream.streamName}...`);
 
@@ -325,7 +473,7 @@
           }
 
           if (["failed", "closed", "disconnected"].includes(connection.connectionState)) {
-            disconnect();
+            disconnect(false, Boolean(sharePageStream));
           }
         });
 
@@ -358,7 +506,7 @@
           }
         } catch (error) {
           if (pc === connection) {
-            disconnect(false);
+            disconnect(false, Boolean(sharePageStream));
           }
           setStatus(`Connection failed: ${error.message}`);
         }
@@ -375,20 +523,42 @@
         streams = await response.json();
         renderStreams();
 
-        if (streams.length) {
-          setStatus("Choose a stream.");
-        } else {
-          setStatus("No streams configured.");
+        const requestedStreamId = getRequestedStreamId();
+        if (requestedStreamId) {
+          const requestedStream = streams.find((stream) => stream.id === requestedStreamId);
+          if (!requestedStream) {
+            setStatus(`This link points to an unknown stream: ${requestedStreamId}`);
+            return null;
+          }
+
+          sharePageStream = requestedStream;
+          renderLaunchView();
+          renderStreams();
+          setStatus(`Ready to start ${requestedStream.streamName}.`);
+          return null;
         }
+
+        if (!streams.length) {
+          renderLaunchView();
+          setStatus("No streams configured.");
+          return null;
+        }
+
+        renderLaunchView();
+        setStatus("Choose a stream.");
+        return null;
       }
 
-      disconnectBtn.addEventListener("click", () => disconnect());
+      disconnectBtn.addEventListener("click", () => disconnect(true, Boolean(sharePageStream)));
+
+      renderPageChrome();
 
       window.addEventListener("load", async () => {
         try {
           await loadStreams();
         } catch (error) {
           streams = [];
+          renderLaunchView();
           renderStreams();
           setStatus(`Failed to load streams: ${error.message}`);
         }
