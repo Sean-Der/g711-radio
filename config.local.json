@@ -1,7 +1,26 @@
 {
   "httpPort": 8080,
-  "streams": [
-    { "streamName": "Studio A", "udpPort": 2250 },
-    { "streamName": "Studio B", "udpPort": 2251 }
-  ]
+  "streams": {
+    "Studios": [
+      { "streamName": "Studio A", "udpPort": 2250 },
+      { "streamName": "Studio B", "udpPort": 2251 },
+      { "streamName": "Studio C", "udpPort": 2252 },
+      { "streamName": "Studio D", "udpPort": 2253 },
+      { "streamName": "Studio E", "udpPort": 2254 }
+    ],
+    "Remote Feeds": [
+      { "streamName": "Remote 1", "udpPort": 2255 },
+      { "streamName": "Remote 2", "udpPort": 2256 },
+      { "streamName": "Remote 3", "udpPort": 2257 },
+      { "streamName": "Remote 4", "udpPort": 2258 },
+      { "streamName": "Remote 5", "udpPort": 2259 }
+    ],
+    "Operations": [
+      { "streamName": "Ops 1", "udpPort": 2260 },
+      { "streamName": "Ops 2", "udpPort": 2261 },
+      { "streamName": "Ops 3", "udpPort": 2262 },
+      { "streamName": "Ops 4", "udpPort": 2263 },
+      { "streamName": "Ops 5", "udpPort": 2264 }
+    ]
+  }
 }

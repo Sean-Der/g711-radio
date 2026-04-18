@@ -13,15 +13,20 @@ Edit the gitignored `config.local.json`, send your UDP audio to the configured p
 
 ## Config
 
-`config.local.json` contains the HTTP port and the UDP stream list:
+`config.local.json` contains the HTTP port and the UDP stream groups:
 
 ```json
 {
   "httpPort": 8080,
-  "streams": [
-    { "streamName": "Studio A", "udpPort": 2250 },
-    { "streamName": "Studio B", "udpPort": 2251 }
-  ]
+  "streams": {
+    "Studios": [
+      { "streamName": "Studio A", "udpPort": 2250 },
+      { "streamName": "Studio B", "udpPort": 2251 }
+    ],
+    "Remote Feeds": [
+      { "streamName": "Field 1", "udpPort": 2260 }
+    ]
+  }
 }
 ```
 
@@ -29,7 +34,7 @@ Edit the gitignored `config.local.json`, send your UDP audio to the configured p
 
 - The server assumes 8 kHz mono G.711 frames and uses `160` audio bytes per packet, which maps to 20 ms of audio.
 - The server is hard-coded for `PCMU` and strips a `12` byte transport header before reading each `160` byte audio frame.
-- The sample client loads all configured streams from `/streams` and lets you connect to one stream at a time.
+- The sample client loads grouped streams from `/streams`, renders them as collapsed accordions, and opens each feed in its own dedicated tab.
 - The sample client uses non-trickle ICE and is intended for local or simple LAN testing. If you need internet-facing playback, add STUN/TURN configuration.
 
 ## Test with GStreamer

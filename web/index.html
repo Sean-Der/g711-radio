@@ -105,6 +105,62 @@
         margin-top: 28px;
       }
 
+      .group {
+        border-radius: 20px;
+        background: rgba(255, 255, 255, 0.72);
+        border: 1px solid var(--line);
+        overflow: hidden;
+      }
+
+      .group summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 18px 20px;
+        cursor: pointer;
+        list-style: none;
+      }
+
+      .group summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .group summary:hover {
+        background: rgba(255, 255, 255, 0.38);
+      }
+
+      .group-info {
+        display: grid;
+        gap: 4px;
+      }
+
+      .group-title {
+        margin: 0;
+        font-size: 1.24rem;
+      }
+
+      .group-meta {
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      .group-indicator {
+        color: var(--muted);
+        font-size: 1rem;
+        transition: transform 160ms ease;
+      }
+
+      .group[open] .group-indicator {
+        transform: rotate(180deg);
+      }
+
+      .group-body {
+        display: grid;
+        gap: 12px;
+        padding: 0 18px 18px;
+      }
+
       .launch {
         display: grid;
         gap: 14px;
@@ -150,7 +206,7 @@
         gap: 12px;
       }
 
-      .stream h2 {
+      .stream h3 {
         margin: 0;
         font-size: 1.2rem;
       }
@@ -199,8 +255,8 @@
     <main>
       <h1>G.711 Radio</h1>
       <p>
-        This page loads the configured streams from the Go server and launches each feed in its own
-        tab, so the player only runs on a dedicated stream page.
+        This page loads the configured stream groups from the Go server. Expand a group, then open
+        each feed in its own tab so the player only runs on a dedicated stream page.
       </p>
 
       <div id="launchRoot"></div>
@@ -217,10 +273,10 @@
       </div>
 
       <p class="note">
-        Stream names and ports come from <code>config.local.json</code>. Every stream is hard-coded
-        for <code>PCMU</code> with a 12-byte header in front of each 160-byte audio frame. The
-        selected feed is kept in the page URL, clicking <code>Listen</code> opens that feed in a
-        new tab, and <code>?stream=...</code> links stop on a page with a
+        Group names, stream names, and ports come from <code>config.local.json</code>. Every stream
+        is hard-coded for <code>PCMU</code> with a 12-byte header in front of each 160-byte audio
+        frame. Click a group to expand it, clicking <code>Listen</code> opens that feed in a new
+        tab, and <code>?stream=...</code> links stop on a page with a
         <code>Start Stream</code> button instead of autoplaying.
       </p>
     </main>
@@ -234,15 +290,29 @@
       const streamsRoot = document.getElementById("streams");
       const streamQueryParam = "stream";
 
+      let streamGroups = [];
       let streams = [];
       let pc;
       let currentStreamId = null;
       let currentStreamName = "";
       let connectingStreamId = null;
       let sharePageStream = null;
+      const expandedGroups = new Set();
 
       function setStatus(text) {
         statusText.textContent = text;
+      }
+
+      function flattenStreamGroups(groups) {
+        return groups.flatMap((group) => group.streams);
+      }
+
+      function getRootStatusText() {
+        return streams.length ? "Expand a group to choose a stream." : "No streams configured.";
+      }
+
+      function formatStreamCount(count) {
+        return `${count} ${count === 1 ? "stream" : "streams"}`;
       }
 
       function hasRequestedStream() {
@@ -296,7 +366,7 @@
         card.className = "launch";
 
         const eyebrow = document.createElement("strong");
-        eyebrow.textContent = "Shared Feed";
+        eyebrow.textContent = sharePageStream.groupName;
 
         const title = document.createElement("h2");
         title.textContent = sharePageStream.streamName;
@@ -323,7 +393,7 @@
           syncURL(null);
           renderLaunchView();
           renderStreams();
-          setStatus(streams.length ? "Choose a stream." : "No streams configured.");
+          setStatus(getRootStatusText());
         });
 
         actions.append(startButton, allStreamsButton);
@@ -348,6 +418,44 @@
         });
       }
 
+      function buildStreamCard(stream) {
+        const card = document.createElement("section");
+        card.className = "stream";
+
+        const header = document.createElement("header");
+        const title = document.createElement("h3");
+        title.textContent = stream.streamName;
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = `UDP ${stream.udpPort}`;
+        header.append(title, meta);
+
+        const button = document.createElement("button");
+        if (connectingStreamId) {
+          button.textContent = connectingStreamId === stream.id ? "Connecting..." : "Busy";
+          button.disabled = true;
+        } else if (currentStreamId === stream.id && pc) {
+          button.textContent = "Listening";
+          button.disabled = false;
+          button.title = "Open this feed in a new tab";
+          button.addEventListener("click", () => openStreamInNewTab(stream));
+        } else {
+          button.textContent = "Listen";
+          button.disabled = false;
+          button.addEventListener("click", () => {
+            if (sharePageStream) {
+              void connect(stream);
+              return;
+            }
+
+            openStreamInNewTab(stream);
+          });
+        }
+
+        card.append(header, button);
+        return card;
+      }
+
       function renderStreams() {
         streamsRoot.hidden = isDedicatedStreamPage();
         streamsRoot.innerHTML = "";
@@ -355,7 +463,7 @@
           return;
         }
 
-        if (!streams.length) {
+        if (!streamGroups.length) {
           const empty = document.createElement("div");
           empty.className = "empty";
           empty.textContent = "No streams are configured.";
@@ -363,42 +471,47 @@
           return;
         }
 
-        for (const stream of streams) {
-          const card = document.createElement("section");
-          card.className = "stream";
+        for (const group of streamGroups) {
+          const details = document.createElement("details");
+          details.className = "group";
+          details.open = expandedGroups.has(group.groupName);
+          details.addEventListener("toggle", () => {
+            if (details.open) {
+              expandedGroups.add(group.groupName);
+            } else {
+              expandedGroups.delete(group.groupName);
+            }
+          });
 
-          const header = document.createElement("header");
+          const summary = document.createElement("summary");
+
+          const info = document.createElement("div");
+          info.className = "group-info";
+
           const title = document.createElement("h2");
-          title.textContent = stream.streamName;
+          title.className = "group-title";
+          title.textContent = group.groupName;
+
           const meta = document.createElement("div");
-          meta.className = "meta";
-          meta.textContent = `UDP ${stream.udpPort}`;
-          header.append(title, meta);
+          meta.className = "group-meta";
+          meta.textContent = formatStreamCount(group.streams.length);
 
-          const button = document.createElement("button");
-          if (connectingStreamId) {
-            button.textContent = connectingStreamId === stream.id ? "Connecting..." : "Busy";
-            button.disabled = true;
-          } else if (currentStreamId === stream.id && pc) {
-            button.textContent = "Listening";
-            button.disabled = false;
-            button.title = "Open this feed in a new tab";
-            button.addEventListener("click", () => openStreamInNewTab(stream));
-          } else {
-            button.textContent = "Listen";
-            button.disabled = false;
-            button.addEventListener("click", () => {
-              if (sharePageStream) {
-                void connect(stream);
-                return;
-              }
+          const indicator = document.createElement("div");
+          indicator.className = "group-indicator";
+          indicator.textContent = "▾";
 
-              openStreamInNewTab(stream);
-            });
+          info.append(title, meta);
+          summary.append(info, indicator);
+          details.append(summary);
+
+          const body = document.createElement("div");
+          body.className = "group-body";
+          for (const stream of group.streams) {
+            body.append(buildStreamCard(stream));
           }
 
-          card.append(header, button);
-          streamsRoot.append(card);
+          details.append(body);
+          streamsRoot.append(details);
         }
       }
 
@@ -520,7 +633,8 @@
           throw new Error(await response.text());
         }
 
-        streams = await response.json();
+        streamGroups = await response.json();
+        streams = flattenStreamGroups(streamGroups);
         renderStreams();
 
         const requestedStreamId = getRequestedStreamId();
@@ -545,7 +659,7 @@
         }
 
         renderLaunchView();
-        setStatus("Choose a stream.");
+        setStatus(getRootStatusText());
         return null;
       }
 
@@ -557,6 +671,7 @@
         try {
           await loadStreams();
         } catch (error) {
+          streamGroups = [];
           streams = [];
           renderLaunchView();
           renderStreams();

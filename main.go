@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -33,8 +35,11 @@ const (
 var webFiles embed.FS
 
 type appConfig struct {
-	HTTPPort int            `json:"httpPort"`
-	Streams  []streamConfig `json:"streams"`
+	HTTPPort int                       `json:"httpPort"`
+	Streams  map[string][]streamConfig `json:"streams"`
+
+	streamGroups []configuredStreamGroup
+	totalStreams int
 }
 
 type streamConfig struct {
@@ -43,9 +48,20 @@ type streamConfig struct {
 }
 
 type streamInfo struct {
+	GroupName  string `json:"groupName"`
 	ID         string `json:"id"`
 	StreamName string `json:"streamName"`
 	UDPPort    int    `json:"udpPort"`
+}
+
+type streamGroup struct {
+	GroupName string       `json:"groupName"`
+	Streams   []streamInfo `json:"streams"`
+}
+
+type configuredStreamGroup struct {
+	GroupName string
+	Streams   []streamConfig
 }
 
 type station struct {
@@ -70,10 +86,10 @@ type offerRequest struct {
 }
 
 type webrtcServer struct {
-	api        *webrtc.API
-	logger     *log.Logger
-	streams    map[string]*station
-	streamList []streamInfo
+	api          *webrtc.API
+	logger       *log.Logger
+	streams      map[string]*station
+	streamGroups []streamGroup
 }
 
 func main() {
@@ -99,59 +115,70 @@ func main() {
 
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine))
 	server := &webrtcServer{
-		api:        api,
-		logger:     logger,
-		streams:    make(map[string]*station, len(config.Streams)),
-		streamList: make([]streamInfo, 0, len(config.Streams)),
+		api:          api,
+		logger:       logger,
+		streams:      make(map[string]*station, config.totalStreams),
+		streamGroups: make([]streamGroup, 0, len(config.streamGroups)),
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	for _, cfg := range config.Streams {
-		info := streamInfo{
-			ID:         fmt.Sprintf("stream-%d", cfg.UDPPort),
-			StreamName: cfg.StreamName,
-			UDPPort:    cfg.UDPPort,
+	for _, group := range config.streamGroups {
+		apiGroup := streamGroup{
+			GroupName: group.GroupName,
+			Streams:   make([]streamInfo, 0, len(group.Streams)),
 		}
 
-		st := &station{
-			info:          info,
-			codec:         codec,
-			frameDuration: frameDuration,
-			logger:        logger,
-			subscribers:   make(map[string]*subscriber),
-		}
-
-		conn, err := net.ListenPacket("udp", fmt.Sprintf(":%d", cfg.UDPPort))
-		if err != nil {
-			logger.Fatalf("listen on UDP %d for %q: %v", cfg.UDPPort, cfg.StreamName, err)
-		}
-
-		server.streams[info.ID] = st
-		server.streamList = append(server.streamList, info)
-
-		logger.Printf(
-			"configured stream %q on UDP %d, codec=PCMU, frame_size=%d bytes, skip_bytes=%d, frame_duration=%s",
-			info.StreamName,
-			info.UDPPort,
-			frameSizeBytes,
-			skipBytes,
-			frameDuration,
-		)
-
-		go func(st *station, conn net.PacketConn) {
-			<-ctx.Done()
-			_ = conn.Close()
-			st.closeSubscribers()
-		}(st, conn)
-
-		go func(st *station, conn net.PacketConn) {
-			if err := st.ingest(ctx, conn); err != nil {
-				logger.Printf("%s ingest stopped: %v", st.info.StreamName, err)
-				stop()
+		for _, cfg := range group.Streams {
+			info := streamInfo{
+				GroupName:  group.GroupName,
+				ID:         fmt.Sprintf("stream-%d", cfg.UDPPort),
+				StreamName: cfg.StreamName,
+				UDPPort:    cfg.UDPPort,
 			}
-		}(st, conn)
+
+			st := &station{
+				info:          info,
+				codec:         codec,
+				frameDuration: frameDuration,
+				logger:        logger,
+				subscribers:   make(map[string]*subscriber),
+			}
+
+			conn, err := net.ListenPacket("udp", fmt.Sprintf(":%d", cfg.UDPPort))
+			if err != nil {
+				logger.Fatalf("listen on UDP %d for %q: %v", cfg.UDPPort, cfg.StreamName, err)
+			}
+
+			server.streams[info.ID] = st
+			apiGroup.Streams = append(apiGroup.Streams, info)
+
+			logger.Printf(
+				"configured stream %q in group %q on UDP %d, codec=PCMU, frame_size=%d bytes, skip_bytes=%d, frame_duration=%s",
+				info.StreamName,
+				info.GroupName,
+				info.UDPPort,
+				frameSizeBytes,
+				skipBytes,
+				frameDuration,
+			)
+
+			go func(st *station, conn net.PacketConn) {
+				<-ctx.Done()
+				_ = conn.Close()
+				st.closeSubscribers()
+			}(st, conn)
+
+			go func(st *station, conn net.PacketConn) {
+				if err := st.ingest(ctx, conn); err != nil {
+					logger.Printf("%s ingest stopped: %v", st.info.StreamName, err)
+					stop()
+				}
+			}(st, conn)
+		}
+
+		server.streamGroups = append(server.streamGroups, apiGroup)
 	}
 
 	staticFS, err := fs.Sub(webFiles, "web")
@@ -176,7 +203,7 @@ func main() {
 		_ = httpServer.Shutdown(shutdownCtx)
 	}()
 
-	logger.Printf("loaded %d stream(s) from %s", len(server.streamList), configPath)
+	logger.Printf("loaded %d stream(s) from %s", config.totalStreams, configPath)
 	logger.Printf("serving WebRTC client on http://localhost:%d", config.HTTPPort)
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Fatal(err)
@@ -200,25 +227,78 @@ func loadConfig(path string) (appConfig, error) {
 	if config.HTTPPort < 1 || config.HTTPPort > 65535 {
 		return appConfig{}, fmt.Errorf("%s has invalid httpPort %d", path, config.HTTPPort)
 	}
-	if len(config.Streams) == 0 {
-		return appConfig{}, fmt.Errorf("%s has no streams configured", path)
+
+	streamGroups, totalStreams, err := normalizeConfiguredGroups(path, config.Streams)
+	if err != nil {
+		return appConfig{}, err
 	}
 
-	seenPorts := make(map[int]struct{}, len(config.Streams))
-	for i, stream := range config.Streams {
-		if stream.StreamName == "" {
-			return appConfig{}, fmt.Errorf("%s entry %d is missing streamName", path, i)
-		}
-		if stream.UDPPort < 1 || stream.UDPPort > 65535 {
-			return appConfig{}, fmt.Errorf("%s entry %d has invalid udpPort %d", path, i, stream.UDPPort)
-		}
-		if _, exists := seenPorts[stream.UDPPort]; exists {
-			return appConfig{}, fmt.Errorf("%s has duplicate udpPort %d", path, stream.UDPPort)
-		}
-		seenPorts[stream.UDPPort] = struct{}{}
-	}
+	config.streamGroups = streamGroups
+	config.totalStreams = totalStreams
 
 	return config, nil
+}
+
+func normalizeConfiguredGroups(path string, rawGroups map[string][]streamConfig) ([]configuredStreamGroup, int, error) {
+	if len(rawGroups) == 0 {
+		return nil, 0, fmt.Errorf("%s has no streams configured", path)
+	}
+
+	groupNames := make([]string, 0, len(rawGroups))
+	for groupName := range rawGroups {
+		groupNames = append(groupNames, groupName)
+	}
+	sort.Strings(groupNames)
+
+	seenGroupNames := make(map[string]struct{}, len(groupNames))
+	seenPorts := make(map[int]struct{})
+	groups := make([]configuredStreamGroup, 0, len(groupNames))
+	totalStreams := 0
+
+	for _, sourceGroupName := range groupNames {
+		groupName := strings.TrimSpace(sourceGroupName)
+		if groupName == "" {
+			return nil, 0, fmt.Errorf("%s has an empty group name", path)
+		}
+		if _, exists := seenGroupNames[groupName]; exists {
+			return nil, 0, fmt.Errorf("%s has duplicate group name %q after trimming whitespace", path, groupName)
+		}
+		seenGroupNames[groupName] = struct{}{}
+
+		rawStreams := rawGroups[sourceGroupName]
+		if len(rawStreams) == 0 {
+			return nil, 0, fmt.Errorf("%s group %q has no streams configured", path, groupName)
+		}
+
+		group := configuredStreamGroup{
+			GroupName: groupName,
+			Streams:   make([]streamConfig, 0, len(rawStreams)),
+		}
+
+		for i, stream := range rawStreams {
+			streamName := strings.TrimSpace(stream.StreamName)
+			if streamName == "" {
+				return nil, 0, fmt.Errorf("%s group %q entry %d is missing streamName", path, groupName, i)
+			}
+			if stream.UDPPort < 1 || stream.UDPPort > 65535 {
+				return nil, 0, fmt.Errorf("%s group %q entry %d has invalid udpPort %d", path, groupName, i, stream.UDPPort)
+			}
+			if _, exists := seenPorts[stream.UDPPort]; exists {
+				return nil, 0, fmt.Errorf("%s has duplicate udpPort %d", path, stream.UDPPort)
+			}
+			seenPorts[stream.UDPPort] = struct{}{}
+
+			group.Streams = append(group.Streams, streamConfig{
+				StreamName: streamName,
+				UDPPort:    stream.UDPPort,
+			})
+		}
+
+		groups = append(groups, group)
+		totalStreams += len(group.Streams)
+	}
+
+	return groups, totalStreams, nil
 }
 
 func (s *station) ingest(ctx context.Context, conn net.PacketConn) error {
@@ -333,7 +413,7 @@ func (s *webrtcServer) handleStreams(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(s.streamList); err != nil {
+	if err := json.NewEncoder(w).Encode(s.streamGroups); err != nil {
 		http.Error(w, "failed to encode streams", http.StatusInternalServerError)
 	}
 }
